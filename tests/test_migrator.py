@@ -119,5 +119,27 @@ class TestMigrator(unittest.TestCase):
             order = json.loads(d["projectsOrder"])
             self.assertIn(pid, order)
 
+    def test_migrate_ide_to_2_chats_only(self):
+        migrator = Migrator(paths=self.paths)
+        res = migrator.migrate_ide_to_2(dry_run=False, chats_only=True)
+        self.assertEqual(res["new_projects_promoted"], 0)
+        self.assertEqual(res["conversations_assigned"], 0)
+
+        # Check DB was NOT updated with new project_id
+        conn = sqlite3.connect(self.paths.ag2_conv_db)
+        cur = conn.cursor()
+        cur.execute("SELECT project_id FROM conversation_summaries WHERE conversation_id = 'conv-1234'")
+        pid = cur.fetchone()[0]
+        conn.close()
+
+        self.assertEqual(pid, "")
+
+        # Check app_storage projectsOrder was NOT modified
+        with open(self.paths.ag2_app_storage, "r", encoding="utf-8") as f:
+            d = json.load(f)
+            order = json.loads(d["projectsOrder"])
+            self.assertEqual(order, ["default-cli-project"])
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -90,10 +90,10 @@ class Migrator:
 
         return report
 
-    def migrate_ide_to_2(self, dry_run: bool = False) -> Dict[str, Any]:
+    def migrate_ide_to_2(self, dry_run: bool = False, chats_only: bool = False) -> Dict[str, Any]:
         """
         Migrates conversations and workspaces from Antigravity IDE (1.x) to Antigravity 2.0.
-        Promotes folder workspaces to First-Class 2.0 Project entities with UUIDs.
+        When chats_only is True, skips promoting workspaces to First-Class 2.0 Project entities.
         """
         results = {
             "direction": "IDE -> 2.0",
@@ -120,12 +120,21 @@ class Migrator:
         if self.paths.ide_vscdb.exists() and self.paths.ag2_vscdb.exists():
             self._merge_vscdb_ide_to_2(dry_run=dry_run)
 
-        # 3. Synchronize conversation_summaries.db & Project Entities
-        if self.paths.ag2_conv_db.exists():
+        # 3. Synchronize conversation_summaries.db & Project Entities (if not chats_only)
+        if not chats_only and self.paths.ag2_conv_db.exists():
             project_stats = self._promote_projects_in_ag2(dry_run=dry_run)
             results["new_projects_promoted"] = project_stats["new_projects"]
             results["conversations_assigned"] = project_stats["convs_updated"]
             results["total_sidebar_projects"] = project_stats["total_sidebar_projects"]
+        elif chats_only and self.paths.ag2_app_storage.exists():
+            try:
+                with open(self.paths.ag2_app_storage, "r", encoding="utf-8") as f:
+                    st_data = json.load(f)
+                    raw_ord = st_data.get("projectsOrder", "[]")
+                    order = json.loads(raw_ord) if isinstance(raw_ord, str) else raw_ord
+                    results["total_sidebar_projects"] = len(order)
+            except Exception:
+                pass
 
         return results
 
@@ -366,7 +375,7 @@ class Migrator:
             "total_sidebar_projects": len(updated_order),
         }
 
-    def migrate_2_to_ide(self, dry_run: bool = False) -> Dict[str, Any]:
+    def migrate_2_to_ide(self, dry_run: bool = False, chats_only: bool = False) -> Dict[str, Any]:
         """
         Migrates conversations and workspace history from Antigravity 2.0 back to Antigravity IDE (1.x).
         """

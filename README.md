@@ -39,7 +39,7 @@ When launched without arguments, the interactive assistant will:
 1. Scan standard installation locations for Antigravity IDE (1.x) and Antigravity 2.0.
 2. Check for running Antigravity processes to ensure data is not overwritten by Electron in-memory caches.
 3. Display discovered session and conversation counts for each environment.
-4. Prompt you to select your desired migration direction (`ide-to-2`, `2-to-ide`, `both`), run a simulation preview (`dry-run`), or specify custom paths.
+4. Prompt you to select your desired migration mode (Full: Chats + Projects, Chats Only: No Projects, 2.0 to IDE, or Bidirectional Sync), run a simulation preview (`dry-run`), or specify custom paths.
 
 ## Overview & Architecture Shift
 
@@ -59,6 +59,7 @@ Antigravity 2.0 introduces an entirely redesigned storage architecture and proje
 
 ### Bidirectional Migration & Synchronization
 - **IDE to 2.0 (`ide-to-2`)**: Imports legacy IDE conversation sessions into 2.0, unpacks Protobuf records into SQLite rows, updates the binary search index, and registers workspaces.
+- **Chats-Only Mode (`--chats-only`)**: Migrates conversation sessions, transcripts, and histories without promoting workspaces to First-Class Project entities or editing project registries. Chats remain unassigned under "outside of project".
 - **2.0 to IDE (`2-to-ide`)**: Backports conversations and sessions created in Antigravity 2.0 into the IDE's `state.vscdb` Protobuf schema, enabling complete portability back to 1.x.
 - **Two-Way Synchronization (`both`)**: Keeps both environments in sync without creating duplicate conversation entries.
 
@@ -114,7 +115,8 @@ The command-line interface provides complete headless control for automated work
 | :--- | :--- |
 | **Inspect Environment Status** | `python migrator.py --status` |
 | **Simulate Changes (Dry Run)** | `python migrator.py --dry-run` |
-| **Migrate IDE to 2.0 (Default)** | `python migrator.py --direction ide-to-2` |
+| **Migrate IDE to 2.0 (Full: Chats + Projects)** | `python migrator.py --direction ide-to-2` |
+| **Migrate Chats Only (No Projects)** | `python migrator.py --chats-only` |
 | **Migrate 2.0 back to IDE** | `python migrator.py --direction 2-to-ide` |
 | **Bidirectional Sync** | `python migrator.py --direction both` |
 | **Custom AppData / Paths** | `python migrator.py --ide-path "<path>" --ag2-path "<path>" --gemini-dir "<path>"` |
@@ -124,7 +126,7 @@ The command-line interface provides complete headless control for automated work
 
 ```
 usage: antigravity-migrator [-h] [--direction {ide-to-2,2-to-ide,both}]
-                            [--dry-run] [--status] [--force]
+                            [--chats-only] [--dry-run] [--status] [--force]
                             [--non-interactive] [--ide-path IDE_PATH]
                             [--ag2-path AG2_PATH] [--gemini-dir GEMINI_DIR]
                             [-v]
@@ -136,6 +138,9 @@ options:
   -h, --help            show this help message and exit
   --direction {ide-to-2,2-to-ide,both}
                         Direction of migration (ide-to-2, 2-to-ide, both)
+  --chats-only, --skip-projects, --no-projects
+                        Migrate conversation sessions and history only,
+                        without promoting workspaces to First-Class Projects in 2.0
   --dry-run             Preview all planned changes without modifying any
                         files or databases
   --status              Display current conversation and project counts across

@@ -26,16 +26,17 @@ def format_table(rows: list, headers: list) -> str:
     row_strs = ["  ".join(str(val).ljust(widths[i]) for i, val in enumerate(row)) for row in rows]
     return f"{header_str}\n{sep_str}\n" + "\n".join(row_strs)
 
-def print_banner(dry_run: bool = False, direction: Optional[str] = None):
+def print_banner(dry_run: bool = False, direction: Optional[str] = None, chats_only: bool = False):
     print("=" * 70)
     tag = " [DRY RUN]" if dry_run else ""
     print(f"  Antigravity Conversation Migrator v{__version__}{tag}")
     if direction:
-        print(f"  Direction: {direction}")
+        mode_str = " (Chats Only - No Projects)" if chats_only else ""
+        print(f"  Direction: {direction}{mode_str}")
     print("=" * 70)
 
-def run_migration_flow(paths: AntigravityPaths, direction: str, dry_run: bool, force: bool):
-    print_banner(dry_run=dry_run, direction=direction)
+def run_migration_flow(paths: AntigravityPaths, direction: str, dry_run: bool, force: bool, chats_only: bool = False):
+    print_banner(dry_run=dry_run, direction=direction, chats_only=chats_only)
 
     # 1. Process Guard
     print("\n[1/4] Checking running processes...")
@@ -63,17 +64,20 @@ def run_migration_flow(paths: AntigravityPaths, direction: str, dry_run: bool, f
     migrator = Migrator(paths=paths)
 
     if direction in ("ide-to-2", "both"):
-        res = migrator.migrate_ide_to_2(dry_run=dry_run)
+        res = migrator.migrate_ide_to_2(dry_run=dry_run, chats_only=chats_only)
         print("\n  --> IDE -> 2.0 Results:")
         print(f"      New raw conversation files copied: {res['copied_conv_files']}")
         print(f"      Brain session transcripts copied:  {res['copied_brain_dirs']}")
         print(f"      WorkspaceStorage caches copied:    {res['copied_workspace_storage']}")
-        print(f"      New 2.0 projects promoted:         {res['new_projects_promoted']}")
-        print(f"      Conversations assigned to projects:{res['conversations_assigned']}")
-        print(f"      Total sidebar projects in 2.0:     {res['total_sidebar_projects']}")
+        if not chats_only:
+            print(f"      New 2.0 projects promoted:         {res['new_projects_promoted']}")
+            print(f"      Conversations assigned to projects:{res['conversations_assigned']}")
+            print(f"      Total sidebar projects in 2.0:     {res['total_sidebar_projects']}")
+        else:
+            print("      Project entity promotion:          Skipped (--chats-only)")
 
     if direction in ("2-to-ide", "both"):
-        res = migrator.migrate_2_to_ide(dry_run=dry_run)
+        res = migrator.migrate_2_to_ide(dry_run=dry_run, chats_only=chats_only)
         print("\n  --> 2.0 -> IDE Results:")
         print(f"      New raw conversation files copied: {res['copied_conv_files']}")
         print(f"      Brain session transcripts copied:  {res['copied_brain_dirs']}")
@@ -140,16 +144,17 @@ def run_interactive_menu():
         print(f"  Antigravity 2.0:       {ag2_tag} -> {paths.ag2_appdata}")
 
         print("\nChoose an action:")
-        print("  [1] Migrate Antigravity IDE (1.x) -> Antigravity 2.0  (Recommended)")
-        print("  [2] Migrate Antigravity 2.0 -> Antigravity IDE (1.x)")
-        print("  [3] Bidirectional Full Sync (Both directions)")
-        print("  [4] Inspect Status & Conversation Counts")
-        print("  [5] Run Dry-Run Simulation (Safe preview without changes)")
-        print("  [6] Configure Custom Paths / Overrides")
+        print("  [1] Migrate Antigravity IDE (1.x) -> Antigravity 2.0 (Full: Chats + Projects)")
+        print("  [2] Migrate Antigravity IDE (1.x) -> Antigravity 2.0 (Chats Only - No Projects)")
+        print("  [3] Migrate Antigravity 2.0 -> Antigravity IDE (1.x)")
+        print("  [4] Bidirectional Full Sync (Both directions)")
+        print("  [5] Inspect Status & Conversation Counts")
+        print("  [6] Run Dry-Run Simulation (Safe preview without changes)")
+        print("  [7] Configure Custom Paths / Overrides")
         print("  [0] Exit")
 
         try:
-            choice = input("\nEnter choice [0-6] (default: 1): ").strip()
+            choice = input("\nEnter choice [0-7] (default: 1): ").strip()
         except (KeyboardInterrupt, EOFError):
             print("\nExiting.")
             break
@@ -163,12 +168,20 @@ def run_interactive_menu():
         elif choice == "1":
             confirm = input("Run as dry-run preview first? [Y/n]: ").strip().lower()
             dry_run = confirm != "n"
-            run_migration_flow(paths, direction="ide-to-2", dry_run=dry_run, force=False)
+            run_migration_flow(paths, direction="ide-to-2", dry_run=dry_run, force=False, chats_only=False)
             if dry_run:
                 run_live = input("\nWould you like to execute the actual migration now? [y/N]: ").strip().lower()
                 if run_live == "y":
-                    run_migration_flow(paths, direction="ide-to-2", dry_run=False, force=False)
+                    run_migration_flow(paths, direction="ide-to-2", dry_run=False, force=False, chats_only=False)
         elif choice == "2":
+            confirm = input("Run as dry-run preview first? [Y/n]: ").strip().lower()
+            dry_run = confirm != "n"
+            run_migration_flow(paths, direction="ide-to-2", dry_run=dry_run, force=False, chats_only=True)
+            if dry_run:
+                run_live = input("\nWould you like to execute the actual migration now? [y/N]: ").strip().lower()
+                if run_live == "y":
+                    run_migration_flow(paths, direction="ide-to-2", dry_run=False, force=False, chats_only=True)
+        elif choice == "3":
             confirm = input("Run as dry-run preview first? [Y/n]: ").strip().lower()
             dry_run = confirm != "n"
             run_migration_flow(paths, direction="2-to-ide", dry_run=dry_run, force=False)
@@ -176,7 +189,7 @@ def run_interactive_menu():
                 run_live = input("\nWould you like to execute the actual migration now? [y/N]: ").strip().lower()
                 if run_live == "y":
                     run_migration_flow(paths, direction="2-to-ide", dry_run=False, force=False)
-        elif choice == "3":
+        elif choice == "4":
             confirm = input("Run as dry-run preview first? [Y/n]: ").strip().lower()
             dry_run = confirm != "n"
             run_migration_flow(paths, direction="both", dry_run=dry_run, force=False)
@@ -184,11 +197,11 @@ def run_interactive_menu():
                 run_live = input("\nWould you like to execute the actual migration now? [y/N]: ").strip().lower()
                 if run_live == "y":
                     run_migration_flow(paths, direction="both", dry_run=False, force=False)
-        elif choice == "4":
-            print_status_report(paths)
         elif choice == "5":
-            run_migration_flow(paths, direction="ide-to-2", dry_run=True, force=False)
+            print_status_report(paths)
         elif choice == "6":
+            run_migration_flow(paths, direction="ide-to-2", dry_run=True, force=False)
+        elif choice == "7":
             print("\nConfigure Custom Paths (press Enter to keep current):")
             new_ide = input(f"Antigravity IDE path [{paths.ide_appdata}]: ").strip()
             new_ag2 = input(f"Antigravity 2.0 path [{paths.ag2_appdata}]: ").strip()
@@ -200,7 +213,7 @@ def run_interactive_menu():
             )
             print("Paths updated successfully.")
         else:
-            print("Invalid choice, please select 0-6.")
+            print("Invalid choice, please select 0-7.")
 
         input("\nPress Enter to return to menu...")
 
@@ -214,6 +227,12 @@ def main():
         choices=["ide-to-2", "2-to-ide", "both"],
         default=None,
         help="Direction of migration (ide-to-2, 2-to-ide, both)"
+    )
+    parser.add_argument(
+        "--chats-only", "--skip-projects", "--no-projects",
+        action="store_true",
+        dest="chats_only",
+        help="Migrate conversation sessions and history only, without promoting workspaces to First-Class Projects in 2.0"
     )
     parser.add_argument(
         "--dry-run",
@@ -279,7 +298,7 @@ def main():
         return
 
     direction = args.direction or "ide-to-2"
-    run_migration_flow(paths, direction=direction, dry_run=args.dry_run, force=args.force)
+    run_migration_flow(paths, direction=direction, dry_run=args.dry_run, force=args.force, chats_only=args.chats_only)
 
 if __name__ == "__main__":
     main()
