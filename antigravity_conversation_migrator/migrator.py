@@ -20,7 +20,14 @@ import urllib.parse
 from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional
 
-from .proto import decode_proto_fields, encode_field, encode_varint, add_or_replace_field
+from .proto import (
+    decode_proto_fields,
+    encode_field,
+    encode_varint,
+    add_or_replace_field,
+    set_cascade_metadata_project_id,
+    get_cascade_metadata_project_id,
+)
 from .paths import AntigravityPaths, normalize_workspace_uri
 
 def copy_directory_files(src_dir: Path, dst_dir: Path, is_dir: bool = False, dry_run: bool = False) -> int:
@@ -282,13 +289,14 @@ class Migrator:
             norm = normalize_workspace_uri(primary_uri)
 
             target_pid = ws_to_pid.get(norm)
-            needs_pid = (target_pid and pid != target_pid)
-            needs_title = (not title and preview)
+            current_proto_pid = get_cascade_metadata_project_id(raw) if raw else None
+            needs_pid = bool(target_pid and (pid != target_pid or current_proto_pid != target_pid))
+            needs_title = bool(not title and preview)
 
             if needs_pid or needs_title:
-                new_pid = target_pid if needs_pid else pid
+                new_pid = target_pid if target_pid else pid
                 new_title = preview if needs_title else title
-                new_raw = add_or_replace_field(raw, 18, 2, new_pid) if (new_pid and new_pid != "outside-of-project") else raw
+                new_raw = set_cascade_metadata_project_id(raw, new_pid, title=new_title) if raw else raw
 
                 convs_updated += 1
                 updated_summaries_proto[cid] = (new_pid, new_title, new_raw)
@@ -333,6 +341,7 @@ class Migrator:
                         pb_data = f.read()
                     pb_fields = decode_proto_fields(pb_data)
                     new_pb = bytearray()
+                    seen_cids = set()
                     for fn, wire, val in pb_fields:
                         if fn == 1 and isinstance(val, bytes):
                             sub = decode_proto_fields(val)
@@ -340,6 +349,8 @@ class Migrator:
                             for sfn, sw, sv in sub:
                                 if sfn == 1 and isinstance(sv, bytes):
                                     cid_val = sv.decode("utf-8", errors="ignore")
+                            if cid_val:
+                                seen_cids.add(cid_val)
                             if cid_val in updated_summaries_proto:
                                 _, _, sum_bytes = updated_summaries_proto[cid_val]
                                 entry_b = bytearray()
@@ -350,6 +361,14 @@ class Migrator:
                                 new_pb.extend(encode_field(fn, wire, val))
                         else:
                             new_pb.extend(encode_field(fn, wire, val))
+
+                    # Append any conversations that were not already in the pb index
+                    for cid_val, (_, _, sum_bytes) in updated_summaries_proto.items():
+                        if cid_val not in seen_cids and sum_bytes:
+                            entry_b = bytearray()
+                            entry_b.extend(encode_field(1, 2, cid_val.encode("utf-8")))
+                            entry_b.extend(encode_field(2, 2, sum_bytes))
+                            new_pb.extend(encode_field(1, 2, bytes(entry_b)))
 
                     with open(self.paths.ag2_agyhub_pb, "wb") as f:
                         f.write(new_pb)

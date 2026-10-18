@@ -6,7 +6,7 @@ import base64
 from pathlib import Path
 from antigravity_conversation_migrator.paths import AntigravityPaths
 from antigravity_conversation_migrator.migrator import Migrator
-from antigravity_conversation_migrator.proto import encode_field
+from antigravity_conversation_migrator.proto import encode_field, get_cascade_metadata_project_id
 
 class TestMigrator(unittest.TestCase):
     def setUp(self):
@@ -105,13 +105,14 @@ class TestMigrator(unittest.TestCase):
         # Check DB was updated
         conn = sqlite3.connect(self.paths.ag2_conv_db)
         cur = conn.cursor()
-        cur.execute("SELECT project_id, title FROM conversation_summaries WHERE conversation_id = 'conv-1234'")
-        pid, title = cur.fetchone()
+        cur.execute("SELECT project_id, title, raw_summary FROM conversation_summaries WHERE conversation_id = 'conv-1234'")
+        pid, title, raw_sum = cur.fetchone()
         conn.close()
 
         self.assertTrue(len(pid) > 0)
         self.assertNotEqual(pid, "outside-of-project")
         self.assertEqual(title, "Test Preview")
+        self.assertEqual(get_cascade_metadata_project_id(raw_sum), pid)
 
         # Check app_storage projectsOrder
         with open(self.paths.ag2_app_storage, "r", encoding="utf-8") as f:
