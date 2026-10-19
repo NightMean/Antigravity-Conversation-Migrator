@@ -6,6 +6,8 @@ a comprehensive headless CLI for scriptable automation.
 """
 
 import sys
+import os
+import subprocess
 import argparse
 from pathlib import Path
 from typing import Optional
@@ -92,6 +94,41 @@ def run_migration_flow(paths: AntigravityPaths, direction: str, dry_run: bool, f
     else:
         print("[+] MIGRATION COMPLETED SUCCESSFULLY!")
         print("    You can now open Antigravity to see all your migrated projects and chats.")
+
+        # Interactive executable launch prompt
+        if sys.stdin.isatty():
+            if direction == "ide-to-2":
+                exe_path = paths.get_executable_path("ag2")
+                app_name = "Antigravity 2.0"
+            elif direction == "2-to-ide":
+                exe_path = paths.get_executable_path("ide")
+                app_name = "Antigravity IDE"
+            else:
+                exe_path = paths.get_executable_path("ag2")
+                app_name = "Antigravity 2.0"
+
+            if exe_path and exe_path.exists():
+                try:
+                    launch = input(f"\nWould you like to launch {app_name} now? [Y/n]: ").strip().lower()
+                    if launch != "n":
+                        print(f"Launching {app_name} ({exe_path})...")
+                        creationflags = 0
+                        if os.name == "nt":
+                            creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+                        subprocess.Popen(
+                            [str(exe_path)],
+                            creationflags=creationflags,
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            close_fds=True
+                        )
+                        return "launched"
+                except Exception as e:
+                    print(f"Note: Could not launch executable automatically: {e}")
+            elif exe_path is None:
+                print(f"Note: {app_name} executable was not detected at standard locations.")
+
     return True
 
 def print_status_report(paths: AntigravityPaths):
@@ -162,45 +199,46 @@ def run_interactive_menu():
         if not choice:
             choice = "1"
 
+        flow_res = None
         if choice == "0":
             print("Exiting.")
             break
         elif choice == "1":
             confirm = input("Run as dry-run preview first? [Y/n]: ").strip().lower()
             dry_run = confirm != "n"
-            run_migration_flow(paths, direction="ide-to-2", dry_run=dry_run, force=False, chats_only=False)
+            flow_res = run_migration_flow(paths, direction="ide-to-2", dry_run=dry_run, force=False, chats_only=False)
             if dry_run:
                 run_live = input("\nWould you like to execute the actual migration now? [y/N]: ").strip().lower()
                 if run_live == "y":
-                    run_migration_flow(paths, direction="ide-to-2", dry_run=False, force=False, chats_only=False)
+                    flow_res = run_migration_flow(paths, direction="ide-to-2", dry_run=False, force=False, chats_only=False)
         elif choice == "2":
             confirm = input("Run as dry-run preview first? [Y/n]: ").strip().lower()
             dry_run = confirm != "n"
-            run_migration_flow(paths, direction="ide-to-2", dry_run=dry_run, force=False, chats_only=True)
+            flow_res = run_migration_flow(paths, direction="ide-to-2", dry_run=dry_run, force=False, chats_only=True)
             if dry_run:
                 run_live = input("\nWould you like to execute the actual migration now? [y/N]: ").strip().lower()
                 if run_live == "y":
-                    run_migration_flow(paths, direction="ide-to-2", dry_run=False, force=False, chats_only=True)
+                    flow_res = run_migration_flow(paths, direction="ide-to-2", dry_run=False, force=False, chats_only=True)
         elif choice == "3":
             confirm = input("Run as dry-run preview first? [Y/n]: ").strip().lower()
             dry_run = confirm != "n"
-            run_migration_flow(paths, direction="2-to-ide", dry_run=dry_run, force=False)
+            flow_res = run_migration_flow(paths, direction="2-to-ide", dry_run=dry_run, force=False)
             if dry_run:
                 run_live = input("\nWould you like to execute the actual migration now? [y/N]: ").strip().lower()
                 if run_live == "y":
-                    run_migration_flow(paths, direction="2-to-ide", dry_run=False, force=False)
+                    flow_res = run_migration_flow(paths, direction="2-to-ide", dry_run=False, force=False)
         elif choice == "4":
             confirm = input("Run as dry-run preview first? [Y/n]: ").strip().lower()
             dry_run = confirm != "n"
-            run_migration_flow(paths, direction="both", dry_run=dry_run, force=False)
+            flow_res = run_migration_flow(paths, direction="both", dry_run=dry_run, force=False)
             if dry_run:
                 run_live = input("\nWould you like to execute the actual migration now? [y/N]: ").strip().lower()
                 if run_live == "y":
-                    run_migration_flow(paths, direction="both", dry_run=False, force=False)
+                    flow_res = run_migration_flow(paths, direction="both", dry_run=False, force=False)
         elif choice == "5":
             print_status_report(paths)
         elif choice == "6":
-            run_migration_flow(paths, direction="ide-to-2", dry_run=True, force=False)
+            flow_res = run_migration_flow(paths, direction="ide-to-2", dry_run=True, force=False)
         elif choice == "7":
             print("\nConfigure Custom Paths (press Enter to keep current):")
             new_ide = input(f"Antigravity IDE path [{paths.ide_appdata}]: ").strip()
@@ -214,6 +252,9 @@ def run_interactive_menu():
             print("Paths updated successfully.")
         else:
             print("Invalid choice, please select 0-7.")
+
+        if flow_res == "launched":
+            break
 
         input("\nPress Enter to return to menu...")
 
