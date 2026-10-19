@@ -51,7 +51,7 @@ Antigravity 2.0 introduces an entirely redesigned storage architecture and proje
 | :--- | :--- | :--- | :--- |
 | **Conversation Index** | Base64 Protobuf map in `state.vscdb` (`trajectorySummaries`) | SQLite database (`conversation_summaries.db`) and binary proto (`agyhub_summaries_proto.pb`) | Bidirectional decoder and encoder converting between both formats |
 | **Workspace Model** | Folder URI keyed map | First-Class Projects with dedicated `project_id` UUIDs | Deterministic `UUIDv5` generation and Protobuf Field 18 binding |
-| **Project Registry** | Implicit folder associations | Explicit `projectsOrder` list in `app_storage.json` | Automatic registration in 2.0 projects list |
+| **Project Registry & Config** | Implicit folder associations | Authoritative config files (`~/.gemini/config/projects/*.json`) and `projectsOrder` in `app_storage.json` | Automatic generation of 2.0 project JSON configs and sidebar registry order |
 | **Session Storage** | `~/.gemini/antigravity-ide/conversations/` and `brain/` | `~/.gemini/antigravity/conversations/` and `brain/` | Automatic file replication and synchronization |
 | **Process Cache** | In-memory Electron SQLite cache | In-memory Electron SQLite cache | Pre-flight process guard and timestamped file backups |
 
@@ -63,15 +63,18 @@ Antigravity 2.0 introduces an entirely redesigned storage architecture and proje
 - **2.0 to IDE (`2-to-ide`)**: Backports conversations and sessions created in Antigravity 2.0 into the IDE's `state.vscdb` Protobuf schema, enabling complete portability back to 1.x.
 - **Two-Way Synchronization (`both`)**: Keeps both environments in sync without creating duplicate conversation entries.
 
-### First-Class Project Promotion
+### First-Class Project Promotion & Verification
 - Identifies unassigned workspace folders and elevates them into first-class Project entities in the Antigravity 2.0 sidebar.
-- Generates stable, deterministic `UUIDv5` identifiers from folder paths, ensuring repeated migrations never duplicate projects.
+- Generates authoritative project configuration files in `~/.gemini/config/projects/<project_id>.json` with `folderUri` and Git repository metadata required by the 2.0 language server.
+- Derives stable, deterministic `UUIDv5` identifiers from folder paths, ensuring repeated migrations never duplicate projects.
 - Injects the `project_id` into Protobuf Field 18 of conversation summary blobs and updates `projectsOrder` in `app_storage.json`.
+- Validates candidate subprojects against physical directories on disk, preventing name truncation and pruning stale or ghost project entries.
+- Preserves workspace-free conversations strictly under "outside of project", ensuring general chat history remains intact.
 
 ### Intelligent Drive & Path Normalization
 - Automatically recognizes relocated projects across drive letters (for example, repositories moved from `J:\Projects\...` to `F:\Projects\...`).
 - Matches folder structures and merges conversations into existing projects rather than generating phantom project entries.
-- Normalizes URL-encoded file paths transparently across operating systems (`file:///C:/...` vs `file:///c%3A/...`).
+- Normalizes URL-encoded file paths transparently across operating systems (`file:///C:/...` vs `file:///c%3A/...`) and standardizes trailing directory dots.
 
 ### Built-in Pure-Python Protobuf Engine
 - Operates entirely with zero third-party dependencies using Python's standard library (`sqlite3`, `json`, `urllib`, `hashlib`, `uuid`, `pathlib`).
@@ -81,6 +84,7 @@ Antigravity 2.0 introduces an entirely redesigned storage architecture and proje
 - **Process Guard**: Automatically detects running instances of `Antigravity.exe`, `antigravity-manager.exe`, and `Antigravity IDE.exe` to prevent database overwrites on application shutdown.
 - **Automated Backups**: Creates timestamped snapshot backups of every database and JSON state file before performing any modifications.
 - **Safe Dry Run**: Supports full simulation via `--dry-run`, detailing all file copies, project creations, and database writes without modifying any files.
+- **Detached Launching**: Launches the external Antigravity process completely detached with `DEVNULL` streams to prevent console log inheritance.
 
 ## Architecture
 
@@ -97,6 +101,9 @@ Antigravity 2.0 introduces an entirely redesigned storage architecture and proje
 │  └── User/globalStorage/      │                   │  ├── conversation_summaries.db    │
 │       └── state.vscdb         │ ◄───────────────► │  └── agyhub_summaries_proto.pb    │
 │            (Protobuf Base64)  │   Schema Adapt    │                                   │
+│                               │                   │ ~/.gemini/config/projects/        │
+│                               │                   │  └── <UUID>.json (Project config) │
+│                               │                   │                                   │
 │                               │                   │ AppData/.../Antigravity/          │
 │                               │                   │  ├── app_storage.json             │
 │                               │                   │  │    (projectsOrder registry)    │
