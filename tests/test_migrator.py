@@ -141,6 +141,38 @@ class TestMigrator(unittest.TestCase):
             order = json.loads(d["projectsOrder"])
             self.assertEqual(order, ["default-cli-project"])
 
+    def test_detect_workspace_multi_uri(self):
+        migrator = Migrator(paths=self.paths)
+        uris = [
+            "file:///f:/Projects/Google_Antigravity_Projects/iOS_GPhotos_Reverse_Engineering",
+            "file:///f:/Projects/Google_Antigravity_Projects/Ollite-LiteRT-LLM-Server",
+            "file:///d:/Downloads/ghidra_12.1.2_PUBLIC"
+        ]
+        # Matching title should select the corresponding URI
+        res_ollite = migrator._detect_conversation_workspace("c1", "Fixing GPU Sampling In OlliteRT", "", uris)
+        self.assertIn("Ollite-LiteRT-LLM-Server", res_ollite)
+
+        res_ghidra = migrator._detect_conversation_workspace("c2", "Fixing Ghidra Setup Script", "", uris)
+        self.assertIn("ghidra_12.1.2_PUBLIC", res_ghidra)
+
+    def test_detect_workspace_empty_uri_markdown_link(self):
+        migrator = Migrator(paths=self.paths)
+        title = "I will list the directory contents of [Chrome-Extensions-Migration-MV3](file:///f:/Projects/Google_Antigravity_Projects/Chrome-Extensions-Migration-MV3)"
+        res = migrator._detect_conversation_workspace("c3", title, "", [])
+        self.assertIn("Chrome-Extensions-Migration-MV3", res)
+
+    def test_detect_workspace_outside_of_project(self):
+        migrator = Migrator(paths=self.paths)
+        title = "Fixing Antigravity IDE Extensions in user configuration"
+        res = migrator._detect_conversation_workspace("c4", title, "", [])
+        self.assertEqual(res, "")
+
+    def test_canonicalize_workspace_uri_trailing_dot(self):
+        from antigravity_conversation_migrator.paths import canonicalize_workspace_uri
+        u = "file:///f:/Projects/Google_Antigravity_Projects/."
+        res = canonicalize_workspace_uri(u)
+        self.assertFalse(res.endswith("/."))
+        self.assertFalse(res.endswith("/."))
+
 if __name__ == "__main__":
     unittest.main()
-

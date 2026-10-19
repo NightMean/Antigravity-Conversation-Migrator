@@ -43,27 +43,111 @@ def uri_to_path(u: str) -> str:
         return "/" + p
     return ""
 
-def normalize_workspace_uri(u: str) -> str:
+def canonicalize_workspace_uri(u: str, base_projects_dir: Optional[Path] = None) -> str:
     """
-    Normalizes a workspace URI:
-    - Decodes URL encoding (%3A, %20, etc.)
-    - Reconciles slashes and casing
-    - If path does not exist on disk, attempts drive re-mapping (e.g. J: -> F:)
+    Normalizes and canonicalizes a workspace URI to match actual directory casing
+    and naming on disk. Handles:
+    - URL decoding (%3A -> :, %20 -> space)
+    - Slash standardization and drive-letter casing
+    - Drive remapping if path moved across drives (e.g. J: -> F:)
+    - Resolving folder name variations (hyphens vs underscores, missing Projects prefix)
+      against actual directories on disk.
     """
     if not u:
         return ""
-    u = urllib.parse.unquote(u)
-    u = u.replace("\\", "/").rstrip("/").lower()
+    import re
+    u = urllib.parse.unquote(u).replace("\\", "/")
+    u = re.sub(r"/+\.?$", "", u)
+    
+    parsed = urllib.parse.urlparse(u)
+    path_part = parsed.path
+    if path_part.startswith("/") and len(path_part) > 2 and path_part[2] == ":":
+        raw_fs_path = path_part[1:]
+    else:
+        raw_fs_path = path_part
 
-    # Drive letter reconciliation if path moved
-    p = uri_to_path(u)
-    if p and not os.path.exists(p) and len(p) >= 2 and p[1] == ':':
-        for candidate_drive in ["f", "c", "d", "e", "g", "h", "i", "j"]:
-            alt_path = candidate_drive + p[1:]
-            if os.path.exists(alt_path):
-                return "file:///" + alt_path.replace("\\", "/").lower()
+    # Direct existence check
+    p = Path(raw_fs_path) if raw_fs_path else None
+    if p:
+        try:
+            p = p.resolve()
+            raw_fs_path = p.as_posix()
+        except Exception:
+            pass
 
-    return u
+    if p and p.exists() and p.is_dir():
+        drive = raw_fs_path[0].lower()
+        if p.name.lower() == "google_antigravity_projects":
+            return f"file:///{drive}:{p.parent.as_posix()[2:]}/{p.name}"
+        try:
+            parent = p.parent
+            if parent.name.lower() == "google_antigravity_projects":
+                for child in parent.iterdir():
+                    if child.name.lower() == p.name.lower():
+                        return f"file:///{drive}:{parent.as_posix()[2:]}/{child.name}"
+        except Exception:
+            pass
+        rest = raw_fs_path[2:].replace("\\", "/").rstrip("/")
+        return f"file:///{drive}:{rest}"
+
+    # Drive letter re-mapping attempt
+    if raw_fs_path and len(raw_fs_path) >= 2 and raw_fs_path[1] == ':':
+        for cand_drive in ["f", "c", "d", "e", "g", "h", "i", "j"]:
+            alt_path = Path(cand_drive + raw_fs_path[1:])
+            if alt_path.exists() and alt_path.is_dir():
+                return f"file:///{cand_drive}:{alt_path.as_posix()[2:]}"
+
+    # Search against Google_Antigravity_Projects on candidate drives
+    m = re.search(r"Google_Antigravity_Projects/([^/]+)", u, re.IGNORECASE)
+    if m:
+        target_name = m.group(1).rstrip("/")
+        cand_bases = []
+        if base_projects_dir and base_projects_dir.exists():
+            cand_bases.append(base_projects_dir)
+        for d in ["f", "c", "d", "e", "j"]:
+            p1 = Path(f"{d}:/Projects/Google_Antigravity_Projects")
+            p2 = Path(f"{d}:/Google_Antigravity_Projects")
+            if p1.exists() and p1 not in cand_bases:
+                cand_bases.append(p1)
+            if p2.exists() and p2 not in cand_bases:
+                cand_bases.append(p2)
+
+        target_norm = re.sub(r"[^a-z0-9]+", "", target_name.lower())
+        for b in cand_bases:
+            try:
+                for child in b.iterdir():
+                    if not child.is_dir() or child.name.startswith("."):
+                        continue
+                    if child.name.lower() == target_name.lower():
+                        drive = b.as_posix()[0].lower()
+                        return f"file:///{drive}:{b.as_posix()[2:]}/{child.name}"
+                    child_norm = re.sub(r"[^a-z0-9]+", "", child.name.lower())
+                    if child_norm == target_norm:
+                        drive = b.as_posix()[0].lower()
+                        return f"file:///{drive}:{b.as_posix()[2:]}/{child.name}"
+                if "slido" in target_norm:
+                    cand = b / "Slido-Upvoter"
+                    if cand.exists():
+                        drive = b.as_posix()[0].lower()
+                        return f"file:///{drive}:{b.as_posix()[2:]}/Slido-Upvoter"
+                if "bazos" in target_norm:
+                    cand = b / "Bazos-Alert-bot"
+                    if cand.exists():
+                        drive = b.as_posix()[0].lower()
+                        return f"file:///{drive}:{b.as_posix()[2:]}/Bazos-Alert-bot"
+                if "gphoto" in target_norm or "ios" in target_norm:
+                    cand = b / "iOS-GPhotos-Reverse-Engineering"
+                    if cand.exists():
+                        drive = b.as_posix()[0].lower()
+                        return f"file:///{drive}:{b.as_posix()[2:]}/iOS-GPhotos-Reverse-Engineering"
+            except Exception:
+                pass
+
+    return u.rstrip("/")
+
+def normalize_workspace_uri(u: str) -> str:
+    """Normalizes a workspace URI using canonicalize_workspace_uri, lowercased."""
+    return canonicalize_workspace_uri(u).lower()
 
 def is_process_running(proc_name: str) -> bool:
     """Checks if a process name is currently running."""
@@ -150,6 +234,8 @@ class AntigravityPaths:
     ):
         base_appdata = get_appdata_dir()
         base_gemini = Path(custom_gemini_dir) if custom_gemini_dir else get_gemini_dir()
+        self.appdata = base_appdata
+        self.gemini = base_gemini
 
         # 1. Antigravity IDE (1.x) AppData Resolution
         if custom_ide_path:
@@ -196,6 +282,7 @@ class AntigravityPaths:
         self.ag2_conv_db = self.ag2_gemini / "conversation_summaries.db"
         self.ag2_agyhub_pb = self.ag2_gemini / "agyhub_summaries_proto.pb"
 
+
     def create_backups(self, dry_run: bool = False) -> List[Path]:
         """Creates timestamped backups of all authoritative database files."""
         stamp = time.strftime("%Y%m%d_%H%M%S")
@@ -215,6 +302,38 @@ class AntigravityPaths:
                     shutil.copy2(f, dst)
         return backed_up
 
+    def get_executable_path(self, target: str) -> Optional[Path]:
+        """
+        Locates the executable for the given environment ('ag2' or 'ide').
+        Checks Registry install locations, local AppData Programs, and standard install paths.
+        """
+        reg_paths = find_registry_install_paths()
+        if target == "ag2":
+            if "ag2_install" in reg_paths:
+                exe = reg_paths["ag2_install"] / "Antigravity.exe"
+                if exe.exists():
+                    return exe
+            candidates = [
+                Path.home() / "AppData" / "Local" / "Programs" / "Antigravity" / "Antigravity.exe",
+                Path("C:/Program Files/Antigravity/Antigravity.exe"),
+            ]
+            for c in candidates:
+                if c.exists():
+                    return c
+        elif target == "ide":
+            if "ide_install" in reg_paths:
+                exe = reg_paths["ide_install"] / "Antigravity IDE.exe"
+                if exe.exists():
+                    return exe
+            candidates = [
+                Path.home() / "AppData" / "Local" / "Programs" / "Antigravity IDE" / "Antigravity IDE.exe",
+                Path("C:/Program Files/Antigravity IDE/Antigravity IDE.exe"),
+            ]
+            for c in candidates:
+                if c.exists():
+                    return c
+        return None
+
     def get_detection_summary(self) -> Dict[str, Dict[str, Any]]:
         """Returns structured detection information for both environments."""
         return {
@@ -232,3 +351,4 @@ class AntigravityPaths:
                 "conversations_dir": str(self.ag2_conversations) if self.ag2_conversations.exists() else "Not Found",
             }
         }
+

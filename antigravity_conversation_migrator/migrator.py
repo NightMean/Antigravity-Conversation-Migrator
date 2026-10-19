@@ -11,12 +11,14 @@ Performs bidirectional conversation and project synchronization:
 
 import os
 import sys
+import re
 import json
 import sqlite3
 import shutil
 import base64
 import uuid
 import urllib.parse
+from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional
 
@@ -27,8 +29,10 @@ from .proto import (
     add_or_replace_field,
     set_cascade_metadata_project_id,
     get_cascade_metadata_project_id,
+    get_cascade_metadata_conversation_id,
+    get_cascade_trajectory_workspace_uri,
 )
-from .paths import AntigravityPaths, normalize_workspace_uri
+from .paths import AntigravityPaths, normalize_workspace_uri, canonicalize_workspace_uri
 
 def copy_directory_files(src_dir: Path, dst_dir: Path, is_dir: bool = False, dry_run: bool = False) -> int:
     """Copies missing files or subdirectories from src_dir to dst_dir."""
@@ -205,14 +209,163 @@ class Migrator:
                 "INSERT OR REPLACE INTO ItemTable (key, value) VALUES ('antigravityUnifiedStateSync.sidebarWorkspaces', ?)",
                 (new_ws_b64,)
             )
+            # Ensure Antigravity 2.0 does not read stale trajectorySummaries protobuf from state.vscdb
+            conn_ag2.execute(
+                "DELETE FROM ItemTable WHERE key = 'antigravityUnifiedStateSync.trajectorySummaries'"
+            )
             conn_ag2.commit()
 
         conn_ag2.close()
 
+    @staticmethod
+    def _score_project_match(candidate_name: str, text: str) -> int:
+        """Scores relevance between candidate project folder name and conversation text."""
+        c_clean = re.sub(r"[^a-z0-9]+", "", candidate_name.lower())
+        t_clean = re.sub(r"[^a-z0-9]+", "", text.lower())
+        if not c_clean or not t_clean:
+            return 0
+        if c_clean in t_clean:
+            return 100
+        tokens = [t for t in re.split(r"[^a-z0-9]+", candidate_name.lower()) if len(t) >= 4]
+        matched = [t for t in tokens if t in t_clean]
+        if matched:
+            return 30 * len(matched)
+        return 0
+
+    def _detect_conversation_workspace(self, cid: str, title: str, preview: str, uris: List[str]) -> str:
+        """
+        Infers the canonical project workspace URI for a conversation:
+        - Multi-URI: Disambiguates by scoring candidate folder names against title/preview.
+        - Single URI: If generic root, refines to specific subproject via title/links/transcript.
+        - Empty URI: Scans title markdown links, transcript active documents, and known project folders.
+        """
+        combined_text = f"{title} {preview}"
+
+        # Collect candidate child directories under Google_Antigravity_Projects
+        cand_bases = [Path(r"F:\Projects\Google_Antigravity_Projects"), Path(r"C:\Projects\Google_Antigravity_Projects")]
+        existing_subdirs = {}
+        for cb in cand_bases:
+            if cb.exists():
+                for child in cb.iterdir():
+                    if child.is_dir() and not child.name.startswith("."):
+                        existing_subdirs[child.name.lower()] = child
+
+        # 1. Multi-URI: Disambiguate by matching against title/preview
+        if len(uris) > 1:
+            best_uri = canonicalize_workspace_uri(uris[0])
+            best_score = -1
+            for u in uris:
+                canon = canonicalize_workspace_uri(u)
+                base = canon.split("/")[-1]
+                score = self._score_project_match(base, combined_text)
+                if score > best_score:
+                    best_score = score
+                    best_uri = canon
+            return best_uri
+
+        # 2. Single URI: Check if it's already a specific subproject
+        if len(uris) == 1:
+            raw_u = re.sub(r"/+\.?$", "", uris[0])
+            canon = canonicalize_workspace_uri(raw_u)
+            slido_check = "slido" in re.sub(r"[^a-z0-9]+", "", combined_text.lower())
+            if slido_check and "slido" not in canon.lower():
+                return "file:///f:/Projects/Google_Antigravity_Projects/Slido-Upvoter"
+            clean = canon.rstrip("/").lower()
+            if not (clean.endswith("google_antigravity_projects") or clean.endswith("projects")):
+                sub_part = canon.rstrip("/").split("/")[-1].lower()
+                if sub_part in existing_subdirs:
+                    return canonicalize_workspace_uri(existing_subdirs[sub_part].as_uri())
+                elif "google_antigravity_projects" in clean:
+                    # Non-existent or truncated subfolder (e.g. /r, /n, /iO, /.), fall through to re-detection
+                    pass
+                else:
+                    return canon
+
+        # 3. Check title / preview for explicit markdown file links
+        m_links = re.findall(r"file:///([^\s\)\"'>]+)", combined_text)
+        for flink in m_links:
+            canon = canonicalize_workspace_uri("file:///" + flink)
+            clean = canon.rstrip("/").lower()
+            if canon and not (clean.endswith("google_antigravity_projects") or clean.endswith("projects")):
+                sub_part = canon.rstrip("/").split("/")[-1].lower()
+                if sub_part in existing_subdirs:
+                    return canonicalize_workspace_uri(existing_subdirs[sub_part].as_uri())
+                elif "google_antigravity_projects" not in clean:
+                    return canon
+
+        # Conversations created outside of project without workspaces or explicit file links stay outside-of-project
+        if not uris:
+            return ""
+
+        # 4. Check transcript for files accessed in subfolders
+        tpath = self.paths.ag2_brain / cid / ".system_generated" / "logs" / "transcript.jsonl"
+        if not tpath.exists():
+            tpath = self.paths.ide_brain / cid / ".system_generated" / "logs" / "transcript.jsonl"
+        if tpath.exists():
+            try:
+                with open(tpath, "r", encoding="utf-8") as f:
+                    for i in range(60):
+                        line = f.readline()
+                        if not line:
+                            break
+                        try:
+                            step_data = json.loads(line)
+                        except Exception:
+                            continue
+
+                        # Check user prompt mentions (e.g. @[path])
+                        content = step_data.get("content", "")
+                        if "@[" in content:
+                            at_matches = re.findall(r"@\[([^\]]+)\]", content)
+                            for at_p in at_matches:
+                                at_canon = canonicalize_workspace_uri(at_p)
+                                at_sub = at_canon.rstrip("/").split("/")[-1].lower()
+                                if at_sub in existing_subdirs:
+                                    return canonicalize_workspace_uri(existing_subdirs[at_sub].as_uri())
+
+                        # Check tool calls
+                        for tc in step_data.get("tool_calls", []):
+                            args = tc.get("args", {})
+                            for arg_key in ["Cwd", "AbsolutePath", "TargetFile", "DirectoryPath"]:
+                                val = args.get(arg_key, "")
+                                if isinstance(val, str) and "Google_Antigravity_Projects" in val:
+                                    val_canon = canonicalize_workspace_uri(val)
+                                    val_clean = val_canon.rstrip("/").lower()
+                                    for sub_name, sub_path in existing_subdirs.items():
+                                        if f"google_antigravity_projects/{sub_name}" in val_clean:
+                                            return canonicalize_workspace_uri(sub_path.as_uri())
+            except Exception:
+                pass
+
+        # 5. Check keywords in title against project folders ONLY if conversation has an existing workspace URI
+        if uris:
+            best_folder = None
+            best_folder_score = 0
+            for sub_name, sub_path in existing_subdirs.items():
+                score = self._score_project_match(sub_path.name, combined_text)
+                if score > best_folder_score and score >= 60:
+                    best_folder_score = score
+                    best_folder = sub_path
+            if best_folder:
+                return canonicalize_workspace_uri(best_folder.as_uri())
+
+        # 6. Fallback to existing single URI if available (normalized)
+        if len(uris) == 1:
+            raw_u = re.sub(r"/+\.?$", "", uris[0])
+            canon = canonicalize_workspace_uri(raw_u)
+            sub_part = canon.rstrip("/").split("/")[-1].lower()
+            if sub_part in existing_subdirs:
+                return canonicalize_workspace_uri(existing_subdirs[sub_part].as_uri())
+            if "google_antigravity_projects" in canon.lower():
+                return "file:///f:/Projects/Google_Antigravity_Projects"
+            return canon
+
+        return ""
+
     def _promote_projects_in_ag2(self, dry_run: bool = False) -> Dict[str, int]:
         """
-        Discovers established 2.0 projects, generates deterministic UUIDs for unassigned
-        workspaces, stamps Field 18 into conversation blobs, and updates projectsOrder.
+        Discovers established 2.0 projects, canonicalizes workspaces, generates deterministic
+        UUIDs for unassigned workspaces, stamps Field 18 into conversation blobs, and updates projectsOrder.
         """
         conn = sqlite3.connect(self.paths.ag2_conv_db if not dry_run else f"file:{self.paths.ag2_conv_db}?mode=ro", uri=dry_run)
         cur = conn.cursor()
@@ -220,43 +373,38 @@ class Migrator:
         cur.execute("SELECT conversation_id, title, preview, workspace_uris, project_id, raw_summary FROM conversation_summaries")
         all_convs = cur.fetchall()
 
-        # Map established projects
-        known_ws_to_pid = {}
+        # 1. Detect canonical workspaces for all conversations
+        detected_ws_map = {}
+        for cid, title, preview, ws_json, pid, raw in all_convs:
+            try:
+                uris = json.loads(ws_json) if ws_json else []
+            except Exception:
+                uris = []
+            detected_ws_map[cid] = self._detect_conversation_workspace(cid, title, preview, uris)
+
+        # 2. Establish project IDs (map each canonical workspace to a unique project ID)
+        ws_to_pid = {}
+        claimed_pids = set()
+
+        # B. Preserve established native 2.0 projects from database without collision
         for cid, title, preview, ws_json, pid, raw in all_convs:
             if pid and pid != "outside-of-project":
-                try:
-                    uris = json.loads(ws_json) if ws_json else []
-                except Exception:
-                    uris = []
-                for u in uris:
-                    norm = normalize_workspace_uri(u)
-                    if norm and norm not in known_ws_to_pid:
-                        known_ws_to_pid[norm] = pid
+                ws = detected_ws_map[cid]
+                if ws and pid not in claimed_pids and ws not in ws_to_pid:
+                    ws_to_pid[ws] = pid
+                    claimed_pids.add(pid)
 
-        # Group unassigned
-        unassigned_convs = {}
-        for cid, title, preview, ws_json, pid, raw in all_convs:
-            if not pid or pid == "outside-of-project":
-                try:
-                    uris = json.loads(ws_json) if ws_json else []
-                except Exception:
-                    uris = []
-                primary_uri = uris[0] if uris else ""
-                norm = normalize_workspace_uri(primary_uri)
-                if norm:
-                    unassigned_convs.setdefault(norm, []).append((cid, title, preview, raw))
-
-        # Assign UUIDs
-        ws_to_pid = dict(known_ws_to_pid)
+        # C. Assign deterministic UUID5 for any workspaces without an established project ID
         newly_promoted = {}
-        for norm, conv_list in unassigned_convs.items():
-            if norm not in ws_to_pid:
-                assigned_pid = str(uuid.uuid5(uuid.NAMESPACE_URL, norm))
-                ws_to_pid[norm] = assigned_pid
-                basename = urllib.parse.unquote(norm.rstrip("/").split("/")[-1])
-                newly_promoted[norm] = (assigned_pid, basename, len(conv_list))
+        for cid, ws in detected_ws_map.items():
+            if ws and ws not in ws_to_pid:
+                assigned_pid = str(uuid.uuid5(uuid.NAMESPACE_URL, ws))
+                ws_to_pid[ws] = assigned_pid
+                claimed_pids.add(assigned_pid)
+                basename = urllib.parse.unquote(ws.rstrip("/").split("/")[-1])
+                newly_promoted[ws] = (assigned_pid, basename)
 
-        # Read existing projectsOrder
+        # 3. Read existing projectsOrder
         current_order = []
         if self.paths.ag2_app_storage.exists():
             try:
@@ -268,15 +416,22 @@ class Migrator:
                 pass
 
         updated_order = list(current_order)
-        for norm, (pid, name, cnt) in newly_promoted.items():
-            if pid not in updated_order:
-                if "default-cli-project" in updated_order:
-                    idx = updated_order.index("default-cli-project")
-                    updated_order.insert(idx, pid)
-                else:
-                    updated_order.append(pid)
+        # Ensure all active project IDs exist in projectsOrder
+        all_active_pids = set(ws_to_pid.values())
+        for pid_val in all_active_pids:
+            if pid_val and pid_val != "outside-of-project" and pid_val not in updated_order:
+                updated_order.append(pid_val)
 
-        # Update conversations
+        # Count conversations per project to prune any empty ghost projects
+        conv_counts = defaultdict(int)
+        for cid, ws in detected_ws_map.items():
+            p = ws_to_pid.get(ws)
+            if p and p != "outside-of-project":
+                conv_counts[p] += 1
+
+        updated_order = [p for p in updated_order if conv_counts.get(p, 0) > 0]
+
+        # 4. Update conversations
         convs_updated = 0
         updated_summaries_proto = {}
 
@@ -285,31 +440,46 @@ class Migrator:
                 uris = json.loads(ws_json) if ws_json else []
             except Exception:
                 uris = []
-            primary_uri = uris[0] if uris else ""
-            norm = normalize_workspace_uri(primary_uri)
 
-            target_pid = ws_to_pid.get(norm)
+            canonical_ws = detected_ws_map[cid]
+            target_pid = ws_to_pid.get(canonical_ws, "outside-of-project") if canonical_ws else "outside-of-project"
+            new_ws_json = json.dumps([canonical_ws]) if canonical_ws else ""
+
             current_proto_pid = get_cascade_metadata_project_id(raw) if raw else None
-            needs_pid = bool(target_pid and (pid != target_pid or current_proto_pid != target_pid))
-            needs_title = bool(not title and preview)
+            current_proto_cid = get_cascade_metadata_conversation_id(raw) if raw else None
+            current_proto_ws = get_cascade_trajectory_workspace_uri(raw) if raw else None
 
-            if needs_pid or needs_title:
-                new_pid = target_pid if target_pid else pid
-                new_title = preview if needs_title else title
-                new_raw = set_cascade_metadata_project_id(raw, new_pid, title=new_title) if raw else raw
+            new_pid = target_pid
+            new_title = preview if (not title and preview) else title
+            expected_raw = set_cascade_metadata_project_id(
+                raw,
+                new_pid,
+                title=new_title,
+                conversation_id=cid,
+                workspace_uri=canonical_ws
+            ) if raw else raw
+
+            needs_pid = bool(pid != target_pid or current_proto_pid != target_pid)
+            needs_ws = bool(ws_json != new_ws_json or (canonical_ws and current_proto_ws != canonical_ws))
+            needs_cid = bool(not current_proto_cid)
+            needs_title = bool(not title and preview)
+            needs_raw = bool(raw and expected_raw != raw)
+
+            if needs_pid or needs_ws or needs_cid or needs_title or needs_raw:
+                new_raw = expected_raw
 
                 convs_updated += 1
                 updated_summaries_proto[cid] = (new_pid, new_title, new_raw)
 
                 if not dry_run:
                     cur.execute(
-                        "UPDATE conversation_summaries SET project_id = ?, title = ?, raw_summary = ? WHERE conversation_id = ?",
-                        (new_pid, new_title, new_raw, cid)
+                        "UPDATE conversation_summaries SET project_id = ?, workspace_uris = ?, title = ?, raw_summary = ? WHERE conversation_id = ?",
+                        (new_pid, new_ws_json, new_title, new_raw, cid)
                     )
                     try:
                         cur.execute(
-                            "UPDATE conversations_fts SET project = ?, title = ? WHERE conversation_id = ?",
-                            (new_pid, new_title, cid)
+                            "UPDATE conversations_fts SET project = ?, workspace = ?, title = ? WHERE conversation_id = ?",
+                            (new_pid, canonical_ws, new_title, cid)
                         )
                     except Exception:
                         pass
@@ -329,51 +499,32 @@ class Migrator:
                             cdb.close()
                         except Exception:
                             pass
+            elif raw:
+                # Keep in memory for full agyhub_pb synchronization
+                updated_summaries_proto[cid] = (pid, title, raw)
 
         if not dry_run:
             conn.commit()
-            conn.close()
 
-            # Update agyhub_summaries_proto.pb
-            if self.paths.ag2_agyhub_pb.exists() and updated_summaries_proto:
+            # Update agyhub_summaries_proto.pb: sync all active conversation summaries directly from conversation_summaries
+            if self.paths.ag2_agyhub_pb.exists():
                 try:
-                    with open(self.paths.ag2_agyhub_pb, "rb") as f:
-                        pb_data = f.read()
-                    pb_fields = decode_proto_fields(pb_data)
+                    cur.execute("SELECT conversation_id, raw_summary FROM conversation_summaries WHERE raw_summary IS NOT NULL")
+                    all_db_summaries = cur.fetchall()
                     new_pb = bytearray()
-                    seen_cids = set()
-                    for fn, wire, val in pb_fields:
-                        if fn == 1 and isinstance(val, bytes):
-                            sub = decode_proto_fields(val)
-                            cid_val = None
-                            for sfn, sw, sv in sub:
-                                if sfn == 1 and isinstance(sv, bytes):
-                                    cid_val = sv.decode("utf-8", errors="ignore")
-                            if cid_val:
-                                seen_cids.add(cid_val)
-                            if cid_val in updated_summaries_proto:
-                                _, _, sum_bytes = updated_summaries_proto[cid_val]
-                                entry_b = bytearray()
-                                entry_b.extend(encode_field(1, 2, cid_val.encode("utf-8")))
-                                entry_b.extend(encode_field(2, 2, sum_bytes))
-                                new_pb.extend(encode_field(1, 2, bytes(entry_b)))
-                            else:
-                                new_pb.extend(encode_field(fn, wire, val))
-                        else:
-                            new_pb.extend(encode_field(fn, wire, val))
-
-                    # Append any conversations that were not already in the pb index
-                    for cid_val, (_, _, sum_bytes) in updated_summaries_proto.items():
-                        if cid_val not in seen_cids and sum_bytes:
+                    for cid_val, raw_bytes in all_db_summaries:
+                        if raw_bytes:
                             entry_b = bytearray()
                             entry_b.extend(encode_field(1, 2, cid_val.encode("utf-8")))
-                            entry_b.extend(encode_field(2, 2, sum_bytes))
+                            entry_b.extend(encode_field(2, 2, raw_bytes))
                             new_pb.extend(encode_field(1, 2, bytes(entry_b)))
 
                     with open(self.paths.ag2_agyhub_pb, "wb") as f:
                         f.write(new_pb)
                 except Exception:
                     pass
+
+            conn.close()
 
             # Update app_storage.json projectsOrder
             if self.paths.ag2_app_storage.exists():
