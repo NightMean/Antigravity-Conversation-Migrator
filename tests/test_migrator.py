@@ -174,5 +174,40 @@ class TestMigrator(unittest.TestCase):
         self.assertFalse(res.endswith("/."))
         self.assertFalse(res.endswith("/."))
 
+    def test_bogus_project_configs_pruned(self):
+        # Create a bogus project JSON in config_projects_dir
+        self.paths.config_projects_dir.mkdir(parents=True, exist_ok=True)
+        bogus_file = self.paths.config_projects_dir / "bogus-id.json"
+        with open(bogus_file, "w", encoding="utf-8") as f:
+            json.dump({
+                "id": "bogus-id",
+                "name": "r",
+                "projectResources": {"resources": [{"folderUri": "file:///f%3A/Projects/Google_Antigravity_Projects/r"}]}
+            }, f)
+
+        migrator = Migrator(paths=self.paths)
+        migrator.migrate_ide_to_2(dry_run=False)
+
+        # Verify bogus file was pruned
+        self.assertFalse(bogus_file.exists())
+
+    def test_project_config_json_generation(self):
+        migrator = Migrator(paths=self.paths)
+        res = migrator.migrate_ide_to_2(dry_run=False)
+        self.assertEqual(res["new_projects_promoted"], 1)
+
+        # Check config JSON was generated
+        json_files = list(self.paths.config_projects_dir.glob("*.json"))
+        self.assertEqual(len(json_files), 1)
+
+        with open(json_files[0], "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data["name"], "Test-Project")
+        self.assertIn("Test-Project", json.dumps(data["projectResources"]))
+
 if __name__ == "__main__":
     unittest.main()
+
+
+
+

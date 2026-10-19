@@ -282,6 +282,9 @@ class AntigravityPaths:
         self.ag2_conv_db = self.ag2_gemini / "conversation_summaries.db"
         self.ag2_agyhub_pb = self.ag2_gemini / "agyhub_summaries_proto.pb"
 
+    @property
+    def config_projects_dir(self) -> Path:
+        return self.gemini / "config" / "projects"
 
     def create_backups(self, dry_run: bool = False) -> List[Path]:
         """Creates timestamped backups of all authoritative database files."""

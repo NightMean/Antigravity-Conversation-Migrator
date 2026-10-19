@@ -386,6 +386,46 @@ class Migrator:
         ws_to_pid = {}
         claimed_pids = set()
 
+        # A. Read authoritative existing project JSON files from ~/.gemini/config/projects
+        if self.paths.config_projects_dir.exists():
+            for pfile in self.paths.config_projects_dir.glob("*.json"):
+                if pfile.name == "outside-of-project.json":
+                    continue
+                try:
+                    with open(pfile, "r", encoding="utf-8") as f:
+                        pdata = json.load(f)
+                    p_id = pdata.get("id")
+                    name = pdata.get("name", "")
+                    res = pdata.get("projectResources", {}).get("resources", [])
+                    uri = None
+                    if res:
+                        uri = res[0].get("folderUri") or res[0].get("gitFolder", {}).get("folderUri")
+
+                    is_bogus = False
+                    if not uri or len(name) <= 1:
+                        is_bogus = True
+                    elif uri.startswith("file:///"):
+                        clean_fs = urllib.parse.unquote(uri[8:])
+                        if len(clean_fs) >= 2 and clean_fs[1] in (':', '%'):
+                            p_path = Path(clean_fs)
+                            if not p_path.exists() or not p_path.is_dir():
+                                is_bogus = True
+
+                    if is_bogus:
+                        if not dry_run:
+                            try:
+                                pfile.unlink(missing_ok=True)
+                            except Exception:
+                                pass
+                        continue
+
+                    if uri and p_id:
+                        canon = canonicalize_workspace_uri(uri)
+                        ws_to_pid[canon] = p_id
+                        claimed_pids.add(p_id)
+                except Exception:
+                    pass
+
         # B. Preserve established native 2.0 projects from database without collision
         for cid, title, preview, ws_json, pid, raw in all_convs:
             if pid and pid != "outside-of-project":
@@ -403,6 +443,46 @@ class Migrator:
                 claimed_pids.add(assigned_pid)
                 basename = urllib.parse.unquote(ws.rstrip("/").split("/")[-1])
                 newly_promoted[ws] = (assigned_pid, basename)
+
+        # D. Ensure all promoted projects have authoritative project config JSON files in ~/.gemini/config/projects/
+        new_project_configs_created = 0
+        if not dry_run:
+            try:
+                self.paths.config_projects_dir.mkdir(parents=True, exist_ok=True)
+                for ws, pid_val in ws_to_pid.items():
+                    if not ws or pid_val == "outside-of-project":
+                        continue
+                    basename = urllib.parse.unquote(ws.rstrip("/").split("/")[-1])
+                    if len(basename) <= 1:
+                        continue
+                    pfile = self.paths.config_projects_dir / f"{pid_val}.json"
+                    if not pfile.exists():
+                        folder_uri = re.sub(r"^file:///([a-zA-Z]):/", r"file:///\1%3A/", ws)
+                        has_git = False
+                        if ws.startswith("file:///"):
+                            clean_fs = ws[8:]
+                            if len(clean_fs) >= 2 and clean_fs[1] == ':':
+                                has_git = (Path(clean_fs) / ".git").exists()
+
+                        res_item = {
+                            "gitFolder": {
+                                "folderUri": folder_uri,
+                                "allowWrite": True
+                            }
+                        } if has_git else {
+                            "folderUri": folder_uri
+                        }
+                        proj_data = {
+                            "id": pid_val,
+                            "name": basename,
+                            "projectResources": {
+                                "resources": [res_item]
+                            }
+                        }
+                        with open(pfile, "w", encoding="utf-8") as pf:
+                            json.dump(proj_data, pf, indent=2)
+            except Exception:
+                pass
 
         # 3. Read existing projectsOrder
         current_order = []
