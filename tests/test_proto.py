@@ -41,5 +41,33 @@ class TestProto(unittest.TestCase):
         self.assertEqual(fields2[1], b"initial")
         self.assertEqual(fields2[18], b"new-uuid-5678")
 
+    def test_cascade_metadata_helpers(self):
+        from antigravity_conversation_migrator.proto import (
+            set_cascade_metadata_project_id,
+            get_cascade_metadata_project_id,
+            get_cascade_metadata_conversation_id,
+        )
+        # Empty raw_blob created from scratch
+        blob = set_cascade_metadata_project_id(
+            b"",
+            project_id="pid-1234",
+            title="My Test Title",
+            conversation_id="cid-5678",
+            workspace_uri="file:///test/path"
+        )
+        self.assertEqual(get_cascade_metadata_project_id(blob), "pid-1234")
+        self.assertEqual(get_cascade_metadata_conversation_id(blob), "cid-5678")
+
+        # Update existing blob
+        updated = set_cascade_metadata_project_id(
+            blob,
+            project_id="pid-9999",
+            title="New Title",
+            conversation_id="cid-5678",
+            workspace_uri="file:///new/path"
+        )
+        self.assertEqual(get_cascade_metadata_project_id(updated), "pid-9999")
+        self.assertEqual(get_cascade_metadata_conversation_id(updated), "cid-5678")
+
 if __name__ == "__main__":
     unittest.main()
